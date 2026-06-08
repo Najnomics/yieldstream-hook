@@ -29,15 +29,16 @@ forge coverage --ir-minimum
 forge coverage --ir-minimum --report lcov
 ```
 
-Latest measured rows:
+Latest measured rows from June 8, 2026:
 
 | File | Lines | Statements | Branches | Functions |
 |------|-------|------------|----------|-----------|
-| `src/YieldStreamHook.sol` | 87.77% | 86.25% | 47.37% | 78.57% |
-| `src/adapters/MorphoAdapter.sol` | 93.75% | 91.67% | 100.00% | 100.00% |
-| `src/rsc/YieldStreamRSC.sol` | 95.65% | 95.45% | 66.67% | 100.00% |
+| `src/YieldStreamHook.sol` | 60.89% | 57.59% | 22.86% | 66.04% |
+| `src/adapters/MorphoAdapter.sol` | 58.62% | 48.15% | 28.57% | 87.50% |
+| `src/rsc/YieldStreamRSC.sol` | 72.22% | 78.79% | 33.33% | 60.00% |
 | `src/tokens/FutureYieldToken.sol` | 93.75% | 83.33% | 0.00% | 100.00% |
 | `src/tokens/PrincipalToken.sol` | 93.75% | 83.33% | 0.00% | 100.00% |
-| Total including scripts/context/harnesses | 66.13% | 62.08% | 33.33% | 76.12% |
+| `src/tokens/YieldStreamTokenFactory.sol` | 100.00% | 100.00% | 100.00% | 100.00% |
+| Total including scripts/demo/context/harnesses | 34.94% | 31.28% | 18.42% | 54.92% |
 
-The suite is focused on meaningful project-owned behavior rather than inherited library code. Remaining gaps are primarily defensive branches, script/demo files that are verified through `forge script`, and callback paths that require live PoolManager/Reactive infrastructure.
+The suite is focused on meaningful project-owned behavior rather than inherited library code. It is not yet at 100% coverage. Remaining gaps are primarily defensive branches, script/demo files that are verified through `forge script`, and callback paths that require live PoolManager/Reactive infrastructure. A credible 100% target would require additional unit harnesses for every owner/error path, script coverage strategy, token failure branches, native-token rejection branches, and callback payment/debt paths.

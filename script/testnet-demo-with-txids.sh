@@ -108,6 +108,47 @@ lasna_tx_url() {
   echo "https://lasna.reactscan.net/tx/$tx"
 }
 
+phase() {
+  local title="$1"
+  echo
+  echo "================================================================"
+  echo "$title"
+  echo "================================================================"
+}
+
+print_workflow() {
+  phase "Judge-facing workflow"
+  cat <<EOF
+This live run proves the deployed YieldStream path from a user's perspective:
+
+  1. Infrastructure proof
+     - Read deployed hook/RSC addresses from .env.
+     - Verify the Lasna RSC subscription and RNK filter for FeesAccrued.
+
+  2. LP onboarding
+     - Mint demo assets to the LP/demo sender.
+     - Approve the deployed YieldStream hook.
+     - Deposit hook-managed Uniswap v4 liquidity.
+     - Confirm the hook minted epoch-scoped FYT and PT.
+
+  3. Yield stream creation
+     - Report backed demo fees into the hook.
+     - Emit FeesAccrued, the exact event Lasna subscribes to.
+     - Print the destination txid and the Lasna RVM tx that observed it.
+
+  4. Autonomous settlement
+     - Wait for the short demo epoch boundary.
+     - Emit a post-boundary FeesAccrued event for the original epoch.
+     - Show Lasna queuing the callback.
+     - Poll the destination chain until EpochSettled appears.
+
+  5. User outcome
+     - Print FYT/PT token addresses, balances, fee totals, and settlement state.
+     - Append the full txid ledger to $E2E_DOC.
+
+EOF
+}
+
 tx_hash_from_json() {
   jq -r '.transactionHash // .hash // empty'
 }
@@ -216,6 +257,11 @@ record_e2e_tx() {
   local url="${4:-$(destination_tx_url "$tx")}"
   [[ -n "$tx" && "$tx" != "null" ]] || return 0
   printf '| %s | %s | `%s` | %s |\n' "$phase" "$description" "$tx" "$url" >>"$E2E_DOC"
+  echo
+  echo "TX [$phase]"
+  echo "  $description"
+  echo "  txid: $tx"
+  echo "  url:  $url"
 }
 
 append_e2e_state() {
@@ -224,6 +270,10 @@ append_e2e_state() {
   local pt="$3"
   local fees0="$4"
   local fees1="$5"
+  local fyt_balance="${6:-}"
+  local pt_balance="${7:-}"
+  local fyt_settled="${8:-}"
+  local pt_redeemable="${9:-}"
   cat >>"$E2E_DOC" <<EOF
 
 ### Result
@@ -235,6 +285,10 @@ append_e2e_state() {
 | PT | \`$pt\` |
 | Fees0 | \`$fees0\` |
 | Fees1 | \`$fees1\` |
+| Demo sender FYT balance | \`$fyt_balance\` |
+| Demo sender PT balance | \`$pt_balance\` |
+| FYT settled | \`$fyt_settled\` |
+| PT redeemable | \`$pt_redeemable\` |
 
 EOF
 }
@@ -545,6 +599,9 @@ echo "Lasna:       chain $LASNA_CHAIN_READ"
 echo "RSC:         $RSC_ADDRESS"
 echo
 
+print_workflow
+
+phase "Phase 1 - Reactive subscription and infrastructure proof"
 print_lasna_subscription_proof
 if ! print_rnk_filter_proof; then
   if [[ "$SUBSCRIPTION_READBACK" == "true" ]]; then
@@ -556,6 +613,8 @@ fi
 
 append_e2e_header
 init_destination_sender
+
+phase "Phase 2 - LP funding, approvals, and hook-managed deposit"
 
 KEY_TUPLE="($DEMO_TOKEN0,$DEMO_TOKEN1,3000,60,$HOOK_ADDRESS)"
 ZERO_SALT="0x0000000000000000000000000000000000000000000000000000000000000000"
@@ -609,6 +668,18 @@ fi
 ORIGINAL_EPOCH="$(cast to-dec "$ORIGINAL_EPOCH_HEX")"
 FYT_ADDRESS="$(cast call "$HOOK_ADDRESS" "getFYTContract(uint256)(address)" "$ORIGINAL_EPOCH" --rpc-url "$DESTINATION_RPC_URL")"
 PT_ADDRESS="$(cast call "$HOOK_ADDRESS" "getPTContract(uint256)(address)" "$ORIGINAL_EPOCH" --rpc-url "$DESTINATION_RPC_URL")"
+FYT_BALANCE="$(cast call "$FYT_ADDRESS" "balanceOf(address)(uint256)" "$DEMO_SENDER" --rpc-url "$DESTINATION_RPC_URL" | awk '{print $1}')"
+PT_BALANCE="$(cast call "$PT_ADDRESS" "balanceOf(address)(uint256)" "$DEMO_SENDER" --rpc-url "$DESTINATION_RPC_URL" | awk '{print $1}')"
+
+echo
+echo "Epoch token proof"
+echo "  deposited epoch: $ORIGINAL_EPOCH"
+echo "  FYT address:     $FYT_ADDRESS"
+echo "  PT address:      $PT_ADDRESS"
+echo "  demo sender FYT: $FYT_BALANCE"
+echo "  demo sender PT:  $PT_BALANCE"
+
+phase "Phase 3 - Fee event emission and Lasna observation"
 
 if [[ "$YIELDSTREAM_RUN_SWAPS" == "1" ]]; then
   send_json="$(send_destination_tx "$SWAP_ROUTER" "swap((address,address,uint24,int24,address),(bool,int256,uint160),(bool,bool),bytes)" "$KEY_TUPLE" "(false,$SWAP_AMOUNT,$MAX_SQRT_MINUS_ONE)" "(false,false)" 0x --gas-limit 900000)"
@@ -625,6 +696,7 @@ record_e2e_tx "FeesAccrued" "Report active-epoch fees and emit the first FeesAcc
 wait_for_rvm_tx "$fees_tx"
 
 if [[ "$YIELDSTREAM_TRIGGER_SETTLEMENT_SWAP" == "1" ]]; then
+  phase "Phase 4 - Demo epoch boundary and Reactive settlement callback"
   if wait_for_epoch_boundary "$HOOK_ADDRESS" "$ORIGINAL_EPOCH"; then
     send_json="$(send_destination_tx "$HOOK_ADDRESS" "reportFees((address,address,uint24,int24,address),uint256,uint256,uint256)" "$KEY_TUPLE" "$ORIGINAL_EPOCH" 3000000000000000 4000000000000000 --gas-limit 250000)"
     fees_tx="$(tx_hash_from_json <<<"$send_json")"
@@ -650,7 +722,24 @@ if [[ -n "$SETTLEMENT_TX" ]]; then
 fi
 
 read fees0 fees1 < <(cast call "$HOOK_ADDRESS" "getEpochFees(uint256)(uint256,uint256)" "$ORIGINAL_EPOCH" --rpc-url "$DESTINATION_RPC_URL" | awk 'NR==1{a=$1} NR==2{b=$1} END{print a, b}')
-append_e2e_state "$ORIGINAL_EPOCH" "$FYT_ADDRESS" "$PT_ADDRESS" "$fees0" "$fees1"
+FYT_BALANCE="$(cast call "$FYT_ADDRESS" "balanceOf(address)(uint256)" "$DEMO_SENDER" --rpc-url "$DESTINATION_RPC_URL" | awk '{print $1}')"
+PT_BALANCE="$(cast call "$PT_ADDRESS" "balanceOf(address)(uint256)" "$DEMO_SENDER" --rpc-url "$DESTINATION_RPC_URL" | awk '{print $1}')"
+FYT_SETTLED="$(cast call "$FYT_ADDRESS" "settled()(bool)" --rpc-url "$DESTINATION_RPC_URL" | awk '{print $1}')"
+PT_REDEEMABLE="$(cast call "$PT_ADDRESS" "redeemable()(bool)" --rpc-url "$DESTINATION_RPC_URL" | awk '{print $1}')"
+
+phase "Phase 5 - User outcome and settlement readback"
+echo "Final user-facing state"
+echo "  epoch:              $ORIGINAL_EPOCH"
+echo "  FYT:                $FYT_ADDRESS"
+echo "  PT:                 $PT_ADDRESS"
+echo "  fees0 accrued:      $fees0"
+echo "  fees1 accrued:      $fees1"
+echo "  demo sender FYT:    $FYT_BALANCE"
+echo "  demo sender PT:     $PT_BALANCE"
+echo "  FYT settled:        $FYT_SETTLED"
+echo "  PT redeemable:      $PT_REDEEMABLE"
+
+append_e2e_state "$ORIGINAL_EPOCH" "$FYT_ADDRESS" "$PT_ADDRESS" "$fees0" "$fees1" "$FYT_BALANCE" "$PT_BALANCE" "$FYT_SETTLED" "$PT_REDEEMABLE"
 
 mkdir -p broadcast
 jq -n \

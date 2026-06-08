@@ -271,6 +271,16 @@ Run the same demo on Unichain Sepolia:
 YIELDSTREAM_E2E_NETWORK=unichain bash script/testnet-demo-with-txids.sh
 ```
 
+The live runner prints a judge-readable workflow:
+
+1. Lasna subscription and RNK filter proof.
+2. LP funding, approvals, and hook-managed liquidity deposit.
+3. FYT/PT token address and balance readback.
+4. Backed `FeesAccrued` emission on the destination chain.
+5. ReactVM observation and callback queue proof on Lasna.
+6. Destination `EpochSettled` callback txid.
+7. Final settlement state and txid ledger append to `docs/e2e.md`.
+
 Verify live Reactive wiring:
 
 ```bash
@@ -324,15 +334,18 @@ Latest verified local run:
 34 tests passed, 0 failed, 0 skipped
 ```
 
-Latest measured project-owned coverage highlights:
+Latest measured coverage from June 8, 2026:
 
 | File | Lines | Statements | Branches | Functions |
 |------|-------|------------|----------|-----------|
-| `src/YieldStreamHook.sol` | 87.77% | 86.25% | 47.37% | 78.57% |
-| `src/adapters/MorphoAdapter.sol` | 93.75% | 91.67% | 100.00% | 100.00% |
-| `src/rsc/YieldStreamRSC.sol` | 95.65% | 95.45% | 66.67% | 100.00% |
+| `src/YieldStreamHook.sol` | 60.89% | 57.59% | 22.86% | 66.04% |
+| `src/adapters/MorphoAdapter.sol` | 58.62% | 48.15% | 28.57% | 87.50% |
+| `src/rsc/YieldStreamRSC.sol` | 72.22% | 78.79% | 33.33% | 60.00% |
 | `src/tokens/FutureYieldToken.sol` | 93.75% | 83.33% | 0.00% | 100.00% |
 | `src/tokens/PrincipalToken.sol` | 93.75% | 83.33% | 0.00% | 100.00% |
+| `src/tokens/YieldStreamTokenFactory.sol` | 100.00% | 100.00% | 100.00% | 100.00% |
+
+The suite currently passes but does not honestly satisfy a 100% coverage claim. The remaining gap is tracked in [docs/TESTING.md](docs/TESTING.md), with most missing coverage in defensive branches, scripts/demo helpers, callback payment paths, and live-infrastructure paths.
 
 ## Deployment
 
