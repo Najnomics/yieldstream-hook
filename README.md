@@ -312,8 +312,8 @@ forge test -vvv
 Run coverage:
 
 ```bash
-forge coverage --ir-minimum
-forge coverage --ir-minimum --report lcov
+forge coverage --ir-minimum --exclude-tests --no-match-coverage 'script|src/demo|src/rsc/ReactivePing|test'
+forge coverage --ir-minimum --exclude-tests --no-match-coverage 'script|src/demo|src/rsc/ReactivePing|test' --report lcov
 ```
 
 Coverage uses `--ir-minimum` because the hook's callback-heavy surface can hit `stack too deep` under Foundry coverage compilation without the IR path.
@@ -331,21 +331,22 @@ Current test suites:
 Latest verified local run:
 
 ```text
-34 tests passed, 0 failed, 0 skipped
+52 tests passed, 0 failed, 0 skipped
 ```
 
 Latest measured coverage from June 8, 2026:
 
 | File | Lines | Statements | Branches | Functions |
 |------|-------|------------|----------|-----------|
-| `src/YieldStreamHook.sol` | 60.89% | 57.59% | 22.86% | 66.04% |
-| `src/adapters/MorphoAdapter.sol` | 58.62% | 48.15% | 28.57% | 87.50% |
-| `src/rsc/YieldStreamRSC.sol` | 72.22% | 78.79% | 33.33% | 60.00% |
-| `src/tokens/FutureYieldToken.sol` | 93.75% | 83.33% | 0.00% | 100.00% |
-| `src/tokens/PrincipalToken.sol` | 93.75% | 83.33% | 0.00% | 100.00% |
+| `src/YieldStreamHook.sol` | 98.04% | 93.97% | 64.29% | 100.00% |
+| `src/adapters/MorphoAdapter.sol` | 96.55% | 96.30% | 100.00% | 100.00% |
+| `src/rsc/YieldStreamRSC.sol` | 100.00% | 100.00% | 100.00% | 100.00% |
+| `src/tokens/FutureYieldToken.sol` | 100.00% | 100.00% | 100.00% | 100.00% |
+| `src/tokens/PrincipalToken.sol` | 100.00% | 100.00% | 100.00% | 100.00% |
 | `src/tokens/YieldStreamTokenFactory.sol` | 100.00% | 100.00% | 100.00% | 100.00% |
+| Total | 98.25% | 94.76% | 71.26% | 100.00% |
 
-The suite currently passes but does not honestly satisfy a 100% coverage claim. The remaining gap is tracked in [docs/TESTING.md](docs/TESTING.md), with most missing coverage in defensive branches, scripts/demo helpers, callback payment paths, and live-infrastructure paths.
+The protocol-owned function surface is at 100% under the filtered command above. The suite does not honestly satisfy a 100% line/branch claim; the remaining gap is tracked in [docs/TESTING.md](docs/TESTING.md), with most missing coverage in defensive branches and Foundry `viaIR` source-map artifacts around simple assignments that are exercised in tests.
 
 ## Deployment
 

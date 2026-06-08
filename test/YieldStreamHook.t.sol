@@ -5,13 +5,16 @@ import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {BalanceDelta, BalanceDeltaLibrary, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {BaseHook} from "v4-hooks-public/src/base/BaseHook.sol";
 import {FutureYieldToken} from "../src/tokens/FutureYieldToken.sol";
 import {PrincipalToken} from "../src/tokens/PrincipalToken.sol";
+import {YieldStreamTokenFactory} from "../src/tokens/YieldStreamTokenFactory.sol";
 import {YieldStreamHook} from "../src/YieldStreamHook.sol";
 import {YieldStreamRSC} from "../src/rsc/YieldStreamRSC.sol";
 import {ReactivePingRSC} from "../src/rsc/ReactivePingRSC.sol";
@@ -72,6 +75,40 @@ contract YieldStreamHookTest is Test {
         assertEq(hook.currentEpoch(), 1);
     }
 
+    function test_adminSettersAndOwnershipGuards() public {
+        vm.prank(bob);
+        vm.expectRevert(YieldStreamHook.OnlyOwner.selector);
+        hook.setReactiveSender(address(0xA));
+
+        vm.expectRevert(YieldStreamHook.InvalidAddress.selector);
+        hook.setReactiveSender(address(0));
+        vm.expectRevert(YieldStreamHook.InvalidAddress.selector);
+        hook.setCallbackProxy(address(0));
+        vm.expectRevert(YieldStreamHook.InvalidAddress.selector);
+        hook.setDirectSettlementCaller(address(0));
+        vm.expectRevert(YieldStreamHook.InvalidAddress.selector);
+        hook.setFeeReporter(address(0));
+        vm.expectRevert(YieldStreamHook.InvalidAddress.selector);
+        hook.transferOwnership(address(0));
+
+        hook.setReactiveSender(address(0xA));
+        hook.setCallbackProxy(address(0xB));
+        hook.setDirectSettlementCaller(address(0xC));
+        hook.setFeeReporter(address(0xD));
+        assertEq(hook.reactiveSender(), address(0xA));
+        assertEq(hook.callbackProxy(), address(0xB));
+        assertEq(hook.directSettlementCaller(), address(0xC));
+        assertEq(hook.feeReporter(), address(0xD));
+
+        hook.transferOwnership(bob);
+        assertEq(hook.owner(), bob);
+        vm.expectRevert(YieldStreamHook.OnlyOwner.selector);
+        hook.setFeeReporter(address(this));
+        vm.prank(bob);
+        hook.setFeeReporter(address(this));
+        assertEq(hook.feeReporter(), address(this));
+    }
+
     function test_customEpochLength_shortDemoEpoch() public {
         YieldStreamHookHarness shortHook =
             new YieldStreamHookHarness(IPoolManager(address(0xCAFE)), address(adapter), callbackProxy, rsc, 20);
@@ -80,6 +117,13 @@ contract YieldStreamHookTest is Test {
         assertEq(shortHook.currentEpoch(), 0);
         vm.roll(20);
         assertEq(shortHook.currentEpoch(), 1);
+    }
+
+    function test_constructorRejectsZeroOwner() public {
+        vm.expectRevert(YieldStreamHook.InvalidAddress.selector);
+        new CustomOwnerYieldStreamHookHarness(
+            IPoolManager(address(0xCAFE)), address(adapter), callbackProxy, rsc, address(0), 20
+        );
     }
 
     function test_afterAddLiquidity_mintsFYTAndPT_andStartsEpoch() public {
@@ -91,6 +135,180 @@ contract YieldStreamHookTest is Test {
         assertTrue(pt != address(0));
         assertEq(FutureYieldToken(fyt).balanceOf(alice), 1 ether * (50_400 - block.number));
         assertEq(PrincipalToken(pt).balanceOf(alice), 1 ether);
+    }
+
+    function test_epochViewsReturnExpectedValues() public {
+        _deposit(alice, 1 ether, -60, 60, 10 ether, 20 ether);
+        assertEq(hook.getFYTContract(0), hook.fytContracts(0));
+        assertEq(hook.getPTContract(0), hook.ptContracts(0));
+        (uint256 totalLiquidity, uint256 totalFees0, uint256 totalFees1, uint256 totalCapital0, uint256 totalCapital1)
+        = hook.getEpochTotals(0);
+        assertEq(totalLiquidity, 1 ether);
+        assertEq(totalFees0, 0);
+        assertEq(totalFees1, 0);
+        assertEq(totalCapital0, 10 ether);
+        assertEq(totalCapital1, 20 ether);
+    }
+
+    function test_depositManagedLiquidityOwnsPositionAndSettlementWithdraws() public {
+        MockPoolManager poolManager = new MockPoolManager();
+        MorphoAdapter managedAdapter = new MorphoAdapter(address(0xBEEF));
+        YieldStreamHookHarness managedHook =
+            new YieldStreamHookHarness(IPoolManager(address(poolManager)), address(managedAdapter), callbackProxy, rsc, 20);
+        managedAdapter.setHook(address(managedHook));
+        PoolKey memory managedKey = PoolKey({
+            currency0: Currency.wrap(address(token0)),
+            currency1: Currency.wrap(address(token1)),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(managedHook))
+        });
+
+        poolManager.setDeltas(toBalanceDelta(-10 ether, -20 ether), toBalanceDelta(10 ether, 20 ether));
+        token0.mint(alice, 15 ether);
+        token1.mint(alice, 25 ether);
+
+        vm.startPrank(alice);
+        token0.approve(address(managedHook), 15 ether);
+        token1.approve(address(managedHook), 25 ether);
+        (uint256 epochId, uint256 amount0, uint256 amount1) = managedHook.depositManagedLiquidity(
+            YieldStreamHook.ManagedLiquidityParams({
+                key: managedKey,
+                tickLower: -60,
+                tickUpper: 60,
+                liquidity: uint128(1 ether),
+                salt: bytes32("demo"),
+                maxAmount0: 15 ether,
+                maxAmount1: 25 ether
+            })
+        );
+        vm.stopPrank();
+
+        assertEq(epochId, 0);
+        assertEq(amount0, 10 ether);
+        assertEq(amount1, 20 ether);
+        assertEq(token0.balanceOf(alice), 5 ether);
+        assertEq(token1.balanceOf(alice), 5 ether);
+        assertEq(token0.balanceOf(address(poolManager)), 10 ether);
+        assertEq(token1.balanceOf(address(poolManager)), 20 ether);
+
+        PrincipalToken pt = PrincipalToken(managedHook.ptContracts(0));
+        assertEq(pt.balanceOf(alice), 1 ether);
+
+        vm.roll(21);
+        managedHook.triggerSettlement(0);
+        assertTrue(managedHook.isEpochSettled(0));
+        assertEq(token0.balanceOf(address(managedHook)), 10 ether);
+        assertEq(token1.balanceOf(address(managedHook)), 20 ether);
+
+        uint256 before0 = token0.balanceOf(alice);
+        uint256 before1 = token1.balanceOf(alice);
+        uint256 alicePt = pt.balanceOf(alice);
+        vm.prank(alice);
+        managedHook.redeemPT(0, alicePt);
+        assertEq(token0.balanceOf(alice) - before0, 10 ether);
+        assertEq(token1.balanceOf(alice) - before1, 20 ether);
+    }
+
+    function test_depositManagedLiquidityRejectsZeroLiquidityAndSlippage() public {
+        MockPoolManager poolManager = new MockPoolManager();
+        MorphoAdapter managedAdapter = new MorphoAdapter(address(0xBEEF));
+        YieldStreamHookHarness managedHook =
+            new YieldStreamHookHarness(IPoolManager(address(poolManager)), address(managedAdapter), callbackProxy, rsc, 20);
+        managedAdapter.setHook(address(managedHook));
+        PoolKey memory managedKey = PoolKey({
+            currency0: Currency.wrap(address(token0)),
+            currency1: Currency.wrap(address(token1)),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(managedHook))
+        });
+
+        vm.expectRevert(YieldStreamHook.NoPosition.selector);
+        managedHook.depositManagedLiquidity(
+            YieldStreamHook.ManagedLiquidityParams({
+                key: managedKey,
+                tickLower: -60,
+                tickUpper: 60,
+                liquidity: 0,
+                salt: bytes32(0),
+                maxAmount0: 0,
+                maxAmount1: 0
+            })
+        );
+
+        poolManager.setDeltas(toBalanceDelta(-10 ether, -20 ether), toBalanceDelta(10 ether, 20 ether));
+        token0.mint(address(managedHook), 1 ether);
+        token0.mint(alice, 9 ether);
+        token1.mint(alice, 20 ether);
+        vm.startPrank(alice);
+        token0.approve(address(managedHook), 9 ether);
+        token1.approve(address(managedHook), 20 ether);
+        vm.expectRevert(YieldStreamHook.SlippageExceeded.selector);
+        managedHook.depositManagedLiquidity(
+            YieldStreamHook.ManagedLiquidityParams({
+                key: managedKey,
+                tickLower: -60,
+                tickUpper: 60,
+                liquidity: uint128(1 ether),
+                salt: bytes32(0),
+                maxAmount0: 9 ether,
+                maxAmount1: 20 ether
+            })
+        );
+        vm.stopPrank();
+    }
+
+    function test_unlockCallbackGuardsCallerAndAction() public {
+        MockPoolManager poolManager = new MockPoolManager();
+        YieldStreamHookHarness managedHook =
+            new YieldStreamHookHarness(IPoolManager(address(poolManager)), address(adapter), callbackProxy, rsc, 20);
+        PoolKey memory managedKey = PoolKey({
+            currency0: Currency.wrap(address(token0)),
+            currency1: Currency.wrap(address(token1)),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(managedHook))
+        });
+        YieldStreamHook.UnlockData memory data = YieldStreamHook.UnlockData({
+            action: 9,
+            beneficiary: alice,
+            epochId: 0,
+            key: managedKey,
+            params: _params(1 ether, -60, 60)
+        });
+
+        vm.expectRevert(YieldStreamHook.OnlyPoolManagerUnlock.selector);
+        managedHook.unlockCallback(abi.encode(data));
+
+        vm.prank(address(poolManager));
+        vm.expectRevert(YieldStreamHook.NoPosition.selector);
+        managedHook.unlockCallback(abi.encode(data));
+    }
+
+    function test_unlockCallbackRejectsNativeCurrencySettlement() public {
+        MockPoolManager poolManager = new MockPoolManager();
+        YieldStreamHookHarness managedHook =
+            new YieldStreamHookHarness(IPoolManager(address(poolManager)), address(adapter), callbackProxy, rsc, 20);
+        PoolKey memory nativeKey = PoolKey({
+            currency0: Currency.wrap(address(0)),
+            currency1: Currency.wrap(address(token1)),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(managedHook))
+        });
+        poolManager.setDeltas(toBalanceDelta(-1 ether, 0), toBalanceDelta(0, 0));
+        YieldStreamHook.UnlockData memory data = YieldStreamHook.UnlockData({
+            action: 1,
+            beneficiary: alice,
+            epochId: 0,
+            key: nativeKey,
+            params: _params(1 ether, -60, 60)
+        });
+
+        vm.prank(address(poolManager));
+        vm.expectRevert(YieldStreamHook.NativeFeeReportUnsupported.selector);
+        managedHook.unlockCallback(abi.encode(data));
     }
 
     function test_epochContracts_reuseExistingForSameEpoch() public {
@@ -164,6 +382,21 @@ contract YieldStreamHookTest is Test {
         hook.reportFees(key, 0, 3 ether, 4 ether);
         assertEq(token0.balanceOf(address(hook)) - hookBefore0, 3 ether);
         assertEq(token1.balanceOf(address(hook)) - hookBefore1, 4 ether);
+    }
+
+    function test_reportFees_revertsForUnstartedZeroAndSettledEpochs() public {
+        vm.expectRevert(YieldStreamHook.EpochNotStarted.selector);
+        hook.reportFees(key, 0, 1 ether, 0);
+
+        _deposit(alice, 1 ether, -60, 60, 10 ether, 20 ether);
+
+        vm.expectRevert(YieldStreamHook.NothingToRedeem.selector);
+        hook.reportFees(key, 0, 0, 0);
+
+        vm.roll(50_401);
+        hook.triggerSettlement(0);
+        vm.expectRevert(YieldStreamHook.EpochSettledAlready.selector);
+        hook.reportFees(key, 0, 1 ether, 0);
     }
 
     function test_settleEpoch_onlyRSC() public {
@@ -272,6 +505,21 @@ contract YieldStreamHookTest is Test {
         assertEq(pt.balanceOf(alice), 0);
     }
 
+    function test_redeemGuardsZeroAndActiveEpoch() public {
+        _deposit(alice, 1 ether, -60, 60, 10 ether, 20 ether);
+        vm.expectRevert(YieldStreamHook.EpochActive.selector);
+        hook.redeemFYT(0, 1);
+        vm.expectRevert(YieldStreamHook.EpochActive.selector);
+        hook.redeemPT(0, 1);
+
+        vm.roll(50_401);
+        hook.triggerSettlement(0);
+        vm.expectRevert(YieldStreamHook.NothingToRedeem.selector);
+        hook.redeemFYT(0, 0);
+        vm.expectRevert(YieldStreamHook.NothingToRedeem.selector);
+        hook.redeemPT(0, 0);
+    }
+
     function test_tokenRedeemEntryPointsWork() public {
         _deposit(alice, 1 ether, -60, 60, 10 ether, 20 ether);
         _swapFees(1 ether, 2 ether);
@@ -285,6 +533,36 @@ contract YieldStreamHookTest is Test {
         pt.redeem(alice);
         assertEq(fyt.balanceOf(alice), 0);
         assertEq(pt.balanceOf(alice), 0);
+    }
+
+    function test_epochTokenOnlyHookAndAlreadySettledGuards() public {
+        _deposit(alice, 1 ether, -60, 60, 10 ether, 20 ether);
+        FutureYieldToken fyt = FutureYieldToken(hook.fytContracts(0));
+        PrincipalToken pt = PrincipalToken(hook.ptContracts(0));
+
+        vm.expectRevert(FutureYieldToken.OnlyHook.selector);
+        fyt.mint(alice, 1);
+        vm.expectRevert(FutureYieldToken.OnlyHook.selector);
+        fyt.burn(alice, 1);
+        vm.expectRevert(FutureYieldToken.OnlyHook.selector);
+        fyt.settle(1, 1);
+
+        vm.expectRevert(PrincipalToken.OnlyHook.selector);
+        pt.mint(alice, 1);
+        vm.expectRevert(PrincipalToken.OnlyHook.selector);
+        pt.burn(alice, 1);
+        vm.expectRevert(PrincipalToken.OnlyHook.selector);
+        pt.enableRedemption(1, 1);
+
+        vm.roll(50_401);
+        hook.triggerSettlement(0);
+
+        vm.prank(address(hook));
+        vm.expectRevert(FutureYieldToken.AlreadySettled.selector);
+        fyt.settle(1, 1);
+        vm.prank(address(hook));
+        vm.expectRevert(PrincipalToken.AlreadyRedeemable.selector);
+        pt.enableRedemption(1, 1);
     }
 
     function test_beforeRemoveLiquidity_enforcesLockup() public {
@@ -335,6 +613,51 @@ contract YieldStreamHookTest is Test {
         );
     }
 
+    function test_afterAddLiquidityRejectsUnmanagedWrongEpochAndZeroLiquidity() public {
+        vm.expectRevert(YieldStreamHook.OnlyHookManagedLiquidity.selector);
+        hook.exposedAfterAddLiquidity(
+            alice,
+            key,
+            _params(1 ether, -60, 60),
+            toBalanceDelta(-10 ether, -20 ether),
+            BalanceDeltaLibrary.ZERO_DELTA,
+            ""
+        );
+
+        uint256 wrongEpoch = hook.currentEpoch() + 1;
+        vm.expectRevert(YieldStreamHook.EpochActive.selector);
+        hook.exposedAfterAddLiquidity(
+            address(hook),
+            key,
+            _params(1 ether, -60, 60),
+            toBalanceDelta(-10 ether, -20 ether),
+            BalanceDeltaLibrary.ZERO_DELTA,
+            _managedHookData(alice, wrongEpoch)
+        );
+
+        uint256 epochId = hook.currentEpoch();
+        vm.expectRevert(YieldStreamHook.NoPosition.selector);
+        hook.exposedAfterAddLiquidity(
+            address(hook),
+            key,
+            _params(0, -60, 60),
+            BalanceDeltaLibrary.ZERO_DELTA,
+            BalanceDeltaLibrary.ZERO_DELTA,
+            _managedHookData(alice, epochId)
+        );
+    }
+
+    function test_redeemForRejectsSpoofedEpochTokenCallers() public {
+        _deposit(alice, 1 ether, -60, 60, 10 ether, 20 ether);
+        FakeEpochToken fake = new FakeEpochToken(0);
+
+        vm.expectRevert(YieldStreamHook.OnlyEpochToken.selector);
+        fake.callRedeemFYTFor(hook, alice, bob, 1);
+
+        vm.expectRevert(YieldStreamHook.OnlyEpochToken.selector);
+        fake.callRedeemPTFor(hook, alice, bob, 1);
+    }
+
     function test_rscQueuesSettlementCallbackAtEpochBoundary() public {
         YieldStreamRSC reactive = new YieldStreamRSC(1, address(hook), 300_000, 0);
         assertTrue(reactive.subscriptionConfigured());
@@ -368,6 +691,56 @@ contract YieldStreamHookTest is Test {
             }
         }
         assertTrue(found);
+    }
+
+    function test_rscConfigureSubscriptionAdminAndVmBranches() public {
+        YieldStreamRSC reactive = new YieldStreamRSC(1, address(hook), 300_000, 20);
+        assertTrue(reactive.subscriptionConfigured());
+
+        vm.prank(bob);
+        vm.expectRevert(YieldStreamRSC.OnlySubscriptionAdmin.selector);
+        reactive.configureSubscription();
+
+        reactive.configureSubscription();
+
+        _pretendLegacyVm(address(reactive));
+        vm.recordLogs();
+        reactive.configureSubscription();
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 unavailableSig = keccak256("SubscriptionUnavailable()");
+        bool unavailable;
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].topics[0] == unavailableSig) unavailable = true;
+        }
+        assertTrue(unavailable);
+    }
+
+    function test_rscConfigureSubscriptionRevertsWhenLegacySystemFails() public {
+        vm.etch(REACTIVE_SYSTEM, address(new MockFailingLegacySystem()).code);
+        YieldStreamRSC reactive = new YieldStreamRSC(1, address(hook), 300_000, 20);
+        assertFalse(reactive.subscriptionConfigured());
+
+        vm.expectRevert(YieldStreamRSC.SubscriptionFailed.selector);
+        reactive.configureSubscription();
+    }
+
+    function test_rscDoesNotQueueBeforeEpochBoundary() public {
+        YieldStreamRSC reactive = new YieldStreamRSC(1, address(hook), 300_000, 20);
+        assertTrue(reactive.subscriptionConfigured());
+        _pretendLegacyVm(address(reactive));
+
+        vm.recordLogs();
+        vm.prank(REACTIVE_SYSTEM);
+        reactive.react(_log(1, 1 ether, 39));
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        bytes32 queuedSig = keccak256("SettlementCallbackQueued(uint256,address)");
+        bool queued;
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].topics[0] == queuedSig) queued = true;
+        }
+        assertFalse(queued);
+        assertFalse(reactive.settlementQueued(1));
     }
 
     function test_rscCustomEpochLengthQueuesAtShortBoundary() public {
@@ -587,5 +960,89 @@ contract MockLegacySystem {
         uint256 topic3
     ) external {
         emit MockSubscription(chainId, contractAddress, topic0, topic1, topic2, topic3);
+    }
+}
+
+contract MockFailingLegacySystem {
+    function subscribe(uint256, address, uint256, uint256, uint256, uint256) external pure {
+        revert("subscription failed");
+    }
+}
+
+contract FakeEpochToken {
+    uint256 public immutable epochId;
+
+    constructor(uint256 _epochId) {
+        epochId = _epochId;
+    }
+
+    function callRedeemFYTFor(YieldStreamHook hook, address holder, address recipient, uint256 amount) external {
+        hook.redeemFYTFor(holder, recipient, amount);
+    }
+
+    function callRedeemPTFor(YieldStreamHook hook, address holder, address recipient, uint256 amount) external {
+        hook.redeemPTFor(holder, recipient, amount);
+    }
+}
+
+contract CustomOwnerYieldStreamHookHarness is YieldStreamHook {
+    constructor(
+        IPoolManager poolManager,
+        address morphoAdapter,
+        address callbackProxy,
+        address directSettlementCaller,
+        address owner,
+        uint256 epochLength
+    )
+        YieldStreamHook(
+            poolManager,
+            address(new YieldStreamTokenFactory()),
+            morphoAdapter,
+            callbackProxy,
+            directSettlementCaller,
+            owner,
+            epochLength
+        )
+    {}
+
+    function validateHookAddress(BaseHook) internal pure override {}
+}
+
+interface IERC20Minimal {
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+
+contract MockPoolManager {
+    using BalanceDeltaLibrary for BalanceDelta;
+
+    BalanceDelta public addDelta;
+    BalanceDelta public removeDelta;
+
+    function setDeltas(BalanceDelta _addDelta, BalanceDelta _removeDelta) external {
+        addDelta = _addDelta;
+        removeDelta = _removeDelta;
+    }
+
+    function unlock(bytes calldata data) external returns (bytes memory) {
+        return IUnlockCallback(msg.sender).unlockCallback(data);
+    }
+
+    function modifyLiquidity(PoolKey memory, ModifyLiquidityParams memory params, bytes calldata)
+        external
+        view
+        returns (BalanceDelta callerDelta, BalanceDelta feesAccrued)
+    {
+        callerDelta = params.liquidityDelta >= 0 ? addDelta : removeDelta;
+        feesAccrued = BalanceDeltaLibrary.ZERO_DELTA;
+    }
+
+    function sync(Currency) external {}
+
+    function settle() external payable returns (uint256 paid) {
+        return msg.value;
+    }
+
+    function take(Currency currency, address to, uint256 amount) external {
+        IERC20Minimal(Currency.unwrap(currency)).transfer(to, amount);
     }
 }
