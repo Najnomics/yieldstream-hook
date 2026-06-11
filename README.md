@@ -139,14 +139,15 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
-    Idle --> EventReceived: FeesAccrued log delivered
-    EventReceived --> AccumulatingFees: read epochId and amount0
-    AccumulatingFees --> ThresholdCheck: compute log.block_number / EPOCH_LENGTH
-    ThresholdCheck --> WaitingForNextEvent: currentEpoch <= eventEpoch
-    ThresholdCheck --> WaitingForNextEvent: settlementQueued[eventEpoch] == true
-    ThresholdCheck --> EmittingCallback: currentEpoch > eventEpoch and not queued
-    EmittingCallback --> WaitingForNextEvent: emit Callback(...)
-    WaitingForNextEvent --> EventReceived: next subscribed event
+    Idle --> EventReceived: fee event
+    EventReceived --> AccumulatingFees: decode log
+    AccumulatingFees --> BoundaryCheck: update counters
+    BoundaryCheck --> WaitingForNextEvent: epoch active
+    BoundaryCheck --> AlreadyQueued: callback queued
+    BoundaryCheck --> EmittingCallback: epoch ended
+    AlreadyQueued --> WaitingForNextEvent: skip duplicate
+    EmittingCallback --> WaitingForNextEvent: callback emitted
+    WaitingForNextEvent --> EventReceived: next event
 ```
 
 ### Hook Callback Logic
