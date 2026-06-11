@@ -66,41 +66,34 @@ The live demo uses short `20` block epochs so judges can observe Reactive settle
 
 ```mermaid
 flowchart TD
-    %% User layer
-    LP["LP / Yield Seller"]
-    Buyer["FYT Buyer / PT Buyer"]
+    LP[LP or Yield Seller]
+    Buyer[FYT or PT Buyer]
+    PM[Uniswap v4 PoolManager]
+    Hook[YieldStreamHook]
+    Factory[YieldStreamTokenFactory]
+    FYT[FutureYieldToken]
+    PT[PrincipalToken]
+    Adapter[MorphoAdapter]
+    Event[FeesAccrued Event]
+    RSC[YieldStreamRSC on Lasna]
+    Proxy[Reactive Callback Proxy]
 
-    %% Uniswap v4 layer
-    PM["Uniswap v4 PoolManager"]
-    Hook["YieldStreamHook.sol\ncallbacks: afterAddLiquidity, afterSwap, beforeRemoveLiquidity"]
-    Factory["YieldStreamTokenFactory.sol"]
-    FYT["FutureYieldToken.sol\nfee claim"]
-    PT["PrincipalToken.sol\nprincipal claim"]
-    Adapter["MorphoAdapter.sol\ndeployed + tested adapter"]
-
-    %% Reactive Network layer
-    Event["FeesAccrued(epochId, amount0, amount1)"]
-    RSC["YieldStreamRSC.sol on Lasna\nReactVM state + epoch check"]
-    Callback["Reactive callback proxy\nsettleEpochFromReactive(sender, epochId)"]
-
-    LP -->|"depositManagedLiquidity"| Hook
-    Hook -->|"PoolManager.unlock / modifyLiquidity"| PM
-    PM -->|"afterAddLiquidity"| Hook
-    PM -->|"afterSwap"| Hook
-    PM -->|"beforeRemoveLiquidity"| Hook
-    Hook -->|"createTokens(epochId, hook)"| Factory
+    LP --> Hook
+    Hook --> PM
+    PM --> Hook
+    Hook --> Factory
     Factory --> FYT
     Factory --> PT
-    Hook -->|"mint FYT"| FYT
-    Hook -->|"mint PT"| PT
-    LP -->|"sell / transfer"| Buyer
-    Hook -. "adapter shell, inactive in live settlement" .-> Adapter
-    Hook -->|"emit"| Event
-    Event -->|"legacy subscription on Lasna"| RSC
-    RSC -->|"emit Callback(chainId, hook, gasLimit, calldata)"| Callback
-    Callback -->|"restricted callback"| Hook
-    FYT -->|"redeem fees"| Buyer
-    PT -->|"redeem capital"| LP
+    Hook --> FYT
+    Hook --> PT
+    LP --> Buyer
+    Hook -.-> Adapter
+    Hook --> Event
+    Event --> RSC
+    RSC --> Proxy
+    Proxy --> Hook
+    FYT --> Buyer
+    PT --> LP
 ```
 
 ### User Journey Diagram
