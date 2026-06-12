@@ -12,6 +12,8 @@
 ![Morpho](https://img.shields.io/badge/Adapter-Morpho-00A3FF)
 ![Hook](https://img.shields.io/badge/Hook%201%20of%208-YieldStream-0A7CFF)
 
+**Submission links:** [Slide Deck](https://gamma.app/docs/YieldStream-Hook-6zg69mi5kaihuji) · [Demo Video](https://youtu.be/7ZatxhbuRMc)
+
 ---
 
 YieldStream Hook is a Uniswap v4 hook that splits a hook-managed LP position into two transferable ERC-20 claims: **FYT**, the Future Yield Token for an epoch's fee stream, and **PT**, the Principal Token for the epoch's LP capital. The hook gives LPs a way to sell future fee income upfront while keeping principal exposure, and gives buyers direct exposure to Uniswap fee generation without managing an LP position. Reactive Network settles epochs by observing `FeesAccrued` events on the destination chain and submitting settlement callbacks through Lasna without a keeper. Built for the UHI9 Hookathon — Impermanent Loss & Yield Systems.
