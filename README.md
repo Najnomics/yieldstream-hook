@@ -29,8 +29,6 @@ YieldStream Hook is a Uniswap v4 hook that splits a hook-managed LP position int
 - [Demo Run](#demo-run)
 - [Test Coverage](#test-coverage)
 - [Local Development](#local-development)
-- [Security Considerations](#security-considerations)
-- [Known Limitations & Future Work](#known-limitations--future-work)
 - [Contributing & License](#contributing--license)
 - [Acknowledgements](#acknowledgements)
 
@@ -597,39 +595,6 @@ forge script script/DemoYieldStream.s.sol -vvv
 YIELDSTREAM_E2E_NETWORK=unichain bash script/testnet-demo-with-txids.sh
 YIELDSTREAM_E2E_NETWORK=base bash script/testnet-demo-with-txids.sh
 ```
-
-## Security Considerations
-
-1. **Reactive callback access control** — `settleEpochFromReactive` requires both `msg.sender == callbackProxy` and `sender == reactiveSender`, so arbitrary EOAs cannot spoof Reactive settlement.
-2. **Direct settlement access control** — `settleEpoch` is restricted to `directSettlementCaller`, while `triggerSettlement` is intentionally permissionless only after epoch end as a fallback.
-3. **Fee-reporting backing** — `reportFees` is restricted to `feeReporter` and transfers token backing into the hook before emitting `FeesAccrued`.
-4. **Pool scoping** — the hook stores a configured pool key and rejects other pools to avoid sharing epoch tokens across unrelated assets.
-5. **Position scoping** — active positions include pool identity, owner, tick range, salt, and epoch to prevent hookData-based lockup bypasses.
-6. **Math safety** — Solidity `0.8.x` checked arithmetic protects overflow and underflow; fixed-point distributions use `PRECISION = 1e18`.
-7. **RSC downtime fallback** — if Reactive Network does not deliver a callback, anyone can call `triggerSettlement(epochId)` after the epoch ends.
-8. **MEV surface** — FYT pricing can be affected by public fee reports and secondary-market liquidity; this is an acknowledged market-design surface rather than a hook accounting bug.
-9. **Reentrancy posture** — settlement state is set before external token settlement calls, and redemptions burn claim tokens before transferring proceeds.
-10. **Native token limitation** — the current hook rejects native-token fee/deposit paths through `NativeFeeReportUnsupported` (Acknowledged — acceptable tradeoff because the demo uses ERC-20 pool assets and avoids ambiguous native settlement semantics).
-
-## Known Limitations & Future Work
-
-### Current Limitations
-
-- ⚠️ **Production fee capture is not finalized.** The live demo uses restricted, backed fee reporting because Uniswap v4 does not hand a hook raw LP fees in `afterSwap`.
-- ⚠️ **Morpho is deployed but inactive in live settlement.** `MorphoAdapter` is tested and deployed as an integration shell, but demo principal does not route through Morpho markets.
-- ⚠️ **Short epochs are demo-specific.** Testnet deployments use `20` block epochs so judges can see settlement quickly; production defaults to `50,400`.
-- ⚠️ **Settlement is event-driven.** Reactive Network has no native scheduler, so autonomous settlement occurs on a subscribed post-boundary event; permissionless settlement covers idle-pool cases.
-- ⚠️ **No external audit claim.** The code has tests and manual review, but it has not completed a third-party audit.
-- ⚠️ **Coverage is not 100% line/branch.** Protocol function coverage is 100%, while remaining line/branch misses are documented in [docs/TESTING.md](docs/TESTING.md).
-
-### Future Work
-
-- **Production-grade v4 fee capture.** Replace demo fee reporting with a final hook-native fee-capture design that does not depend on a trusted reporter.
-- **Morpho Blue principal routing.** Add explicit market configuration, caps, and withdrawal failure handling so idle principal can earn yield without weakening PT redemption guarantees.
-- **Per-pool epoch configuration.** Allow safe deployment presets for weekly, daily, and demo epochs while preserving immutable risk disclosures for each pool.
-- **Secondary-market bootstrap tooling.** Add scripts and UI flows for FYT/PT liquidity pools so yield sellers and buyers can discover prices immediately after deposit.
-- **Rolling epochs.** Let LPs opt into automatic rollover so new FYT/PT claims are minted without manually re-depositing each epoch.
-- **Audit hardening.** Expand PoolManager fork tests, add invariant testing around multi-position settlement, and prepare a formal external audit package.
 
 ## Contributing & License
 
